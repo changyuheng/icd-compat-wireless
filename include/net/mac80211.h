@@ -1317,6 +1317,7 @@ enum ieee80211_smps_mode {
  *
  * @power_level: requested transmit power (in dBm), backward compatibility
  *	value only that is set to the minimum of all interfaces
+ * @max_antenna_gain: maximum antenna gain adjusted by user config (in dBi)
  *
  * @chandef: the channel definition to tune to
  * @radar_enabled: whether radar detection is enabled
@@ -1337,6 +1338,7 @@ enum ieee80211_smps_mode {
 struct ieee80211_conf {
 	u32 flags;
 	int power_level, dynamic_ps_timeout;
+	int max_antenna_gain;
 
 	u16 listen_interval;
 	u8 ps_dtim_period;
@@ -2014,6 +2016,9 @@ struct ieee80211_txq {
  * @IEEE80211_HW_TX_FRAG_LIST: Hardware (or driver) supports sending frag_list
  *	skbs, needed for zero-copy software A-MSDU.
  *
+ * @IEEE80211_HW_NEEDS_ALIGNED4_SKBS: Driver need aligned skbs to four-byte.
+ *	Padding will be added after ieee80211_hdr, before IV/LLC.
+ *
  * @NUM_IEEE80211_HW_FLAGS: number of hardware flags, used for sizing arrays
  */
 enum ieee80211_hw_flags {
@@ -2054,6 +2059,7 @@ enum ieee80211_hw_flags {
 	IEEE80211_HW_USES_RSS,
 	IEEE80211_HW_TX_AMSDU,
 	IEEE80211_HW_TX_FRAG_LIST,
+	IEEE80211_HW_NEEDS_ALIGNED4_SKBS,
 
 	/* keep last, obviously */
 	NUM_IEEE80211_HW_FLAGS

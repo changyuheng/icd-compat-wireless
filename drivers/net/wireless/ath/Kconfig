@@ -1,5 +1,5 @@
 config ATH_COMMON
-	tristate
+	tristate "ath.ko"
 	depends on m
 
 config WLAN_VENDOR_ATH
@@ -22,6 +22,9 @@ config WLAN_VENDOR_ATH
 	  http://wireless.kernel.org/en/users/Drivers/Atheros
 
 if WLAN_VENDOR_ATH
+
+config ATH_USER_REGD
+	bool "Do not enforce EEPROM regulatory restrictions"
 
 config ATH_DEBUG
 	bool "Atheros wireless debugging"

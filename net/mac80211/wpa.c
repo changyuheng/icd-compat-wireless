@@ -43,7 +43,7 @@ ieee80211_tx_h_michael_mic_add(struct ieee80211_tx_data *tx)
 	    skb->len < 24 || !ieee80211_is_data_present(hdr->frame_control))
 		return TX_CONTINUE;
 
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
+	hdrlen = tx->hdrlen;
 	if (skb->len < hdrlen)
 		return TX_DROP;
 
@@ -186,7 +186,6 @@ mic_fail_no_key:
 
 static int tkip_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb)
 {
-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
 	struct ieee80211_key *key = tx->key;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	unsigned int hdrlen;
@@ -201,7 +200,7 @@ static int tkip_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb)
 		return 0;
 	}
 
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
+	hdrlen = tx->hdrlen;
 	len = skb->len - hdrlen;
 
 	if (info->control.hw_key)
@@ -304,7 +303,8 @@ ieee80211_crypto_tkip_decrypt(struct ieee80211_rx_data *rx)
 }
 
 
-static void ccmp_special_blocks(struct sk_buff *skb, u8 *pn, u8 *b_0, u8 *aad)
+static void ccmp_special_blocks(struct sk_buff *skb, u8 *pn, u8 *b_0, u8 *aad,
+				u16 data_len)
 {
 	__le16 mask_fc;
 	int a4_included, mgmt;
@@ -334,14 +334,8 @@ static void ccmp_special_blocks(struct sk_buff *skb, u8 *pn, u8 *b_0, u8 *aad)
 	else
 		qos_tid = 0;
 
-	/* In CCM, the initial vectors (IV) used for CTR mode encryption and CBC
-	 * mode authentication are not allowed to collide, yet both are derived
-	 * from this vector b_0. We only set L := 1 here to indicate that the
-	 * data size can be represented in (L+1) bytes. The CCM layer will take
-	 * care of storing the data length in the top (L+1) bytes and setting
-	 * and clearing the other bits as is required to derive the two IVs.
-	 */
-	b_0[0] = 0x1;
+	/* First block, b_0 */
+	b_0[0] = 0x59; /* flags: Adata: 1, M: 011, L: 001 */
 
 	/* Nonce: Nonce Flags | A2 | PN
 	 * Nonce Flags: Priority (b0..b3) | Management (b4) | Reserved (b5..b7)
@@ -349,6 +343,8 @@ static void ccmp_special_blocks(struct sk_buff *skb, u8 *pn, u8 *b_0, u8 *aad)
 	b_0[1] = qos_tid | (mgmt << 4);
 	memcpy(&b_0[2], hdr->addr2, ETH_ALEN);
 	memcpy(&b_0[8], pn, IEEE80211_CCMP_PN_LEN);
+	/* l(m) */
+	put_unaligned_be16(data_len, &b_0[14]);
 
 	/* AAD (extra authenticate-only data) / masked 802.11 header
 	 * FC | A1 | A2 | A3 | SC | [A4] | [QC] */
@@ -421,7 +417,7 @@ static int ccmp_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb,
 		return 0;
 	}
 
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
+	hdrlen = tx->hdrlen;
 	len = skb->len - hdrlen;
 
 	if (info->control.hw_key)
@@ -460,7 +456,7 @@ static int ccmp_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb,
 		return 0;
 
 	pos += IEEE80211_CCMP_HDR_LEN;
-	ccmp_special_blocks(skb, pn, b_0, aad);
+	ccmp_special_blocks(skb, pn, b_0, aad, len);
 	ieee80211_aes_ccm_encrypt(key->u.ccmp.tfm, b_0, aad, pos, len,
 				  skb_put(skb, mic_len), mic_len);
 
@@ -537,7 +533,7 @@ ieee80211_crypto_ccmp_decrypt(struct ieee80211_rx_data *rx,
 			u8 aad[2 * AES_BLOCK_SIZE];
 			u8 b_0[AES_BLOCK_SIZE];
 			/* hardware didn't decrypt/verify MIC */
-			ccmp_special_blocks(skb, pn, b_0, aad);
+			ccmp_special_blocks(skb, pn, b_0, aad, data_len);
 
 			if (ieee80211_aes_ccm_decrypt(
 				    key->u.ccmp.tfm, b_0, aad,
@@ -654,7 +650,7 @@ static int gcmp_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb)
 		return 0;
 	}
 
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
+	hdrlen = tx->hdrlen;
 	len = skb->len - hdrlen;
 
 	if (info->control.hw_key)
@@ -794,7 +790,6 @@ static ieee80211_tx_result
 ieee80211_crypto_cs_encrypt(struct ieee80211_tx_data *tx,
 			    struct sk_buff *skb)
 {
-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
 	struct ieee80211_key *key = tx->key;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	int hdrlen;
@@ -810,8 +805,7 @@ ieee80211_crypto_cs_encrypt(struct ieee80211_tx_data *tx,
 		     pskb_expand_head(skb, iv_len, 0, GFP_ATOMIC)))
 		return TX_DROP;
 
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
-
+	hdrlen = tx->hdrlen;
 	pos = skb_push(skb, iv_len);
 	memmove(pos, pos + iv_len, hdrlen);
 

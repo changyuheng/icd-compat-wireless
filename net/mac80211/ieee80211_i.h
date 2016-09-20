@@ -173,6 +173,7 @@ struct ieee80211_tx_data {
 	struct ieee80211_tx_rate rate;
 
 	unsigned int flags;
+	unsigned int hdrlen;
 };
 
 
@@ -1337,6 +1338,7 @@ struct ieee80211_local {
 	int dynamic_ps_forced_timeout;
 
 	int user_power_level; /* in dBm, for all interfaces */
+	int user_antenna_gain; /* in dBi */
 
 	enum ieee80211_smps_mode smps_mode;
 
@@ -1494,6 +1496,29 @@ ieee80211_have_rx_timestamp(struct ieee80211_rx_status *status)
 	    !(status->flag & (RX_FLAG_HT | RX_FLAG_VHT)))
 		return true;
 	return false;
+}
+
+static inline unsigned int
+ieee80211_hdr_padsize(struct ieee80211_hw *hw, unsigned int hdrlen)
+{
+	/*
+	 * While hdrlen is already aligned to two-byte boundaries,
+	 * simple check with & 2 will return correct padsize.
+	 */
+	if (ieee80211_hw_check(hw, NEEDS_ALIGNED4_SKBS))
+		return hdrlen & 2;
+	return 0;
+}
+
+static inline unsigned int
+ieee80211_padded_hdrlen(struct ieee80211_hw *hw, __le16 fc)
+{
+	unsigned int hdrlen;
+
+	hdrlen = ieee80211_hdrlen(fc);
+	hdrlen += ieee80211_hdr_padsize(hw, hdrlen);
+
+	return hdrlen;
 }
 
 u64 ieee80211_calculate_rx_timestamp(struct ieee80211_local *local,

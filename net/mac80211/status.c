@@ -683,8 +683,21 @@ void ieee80211_tx_monitor(struct ieee80211_local *local, struct sk_buff *skb,
 	struct sk_buff *skb2;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_sub_if_data *sdata;
+	struct ieee80211_hdr *hdr = (void *)skb->data;
 	struct net_device *prev_dev = NULL;
+	unsigned int hdrlen, padsize;
 	int rtap_len;
+
+	/* Remove padding if was added */
+	if (ieee80211_hw_check(&local->hw, NEEDS_ALIGNED4_SKBS)) {
+		hdrlen = ieee80211_hdrlen(hdr->frame_control);
+		padsize = ieee80211_hdr_padsize(&local->hw, hdrlen);
+
+		if (padsize && skb->len > hdrlen + padsize) {
+			memmove(skb->data + padsize, skb->data, hdrlen);
+			skb_pull(skb, padsize);
+		}
+	}
 
 	/* send frame to monitor interfaces now */
 	rtap_len = ieee80211_tx_radiotap_len(info);
@@ -771,6 +784,13 @@ void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 			clear_sta_flag(sta, WLAN_STA_SP);
 
 		acked = !!(info->flags & IEEE80211_TX_STAT_ACK);
+
+		/* mesh Peer Service Period support */
+		if (ieee80211_vif_is_mesh(&sta->sdata->vif) &&
+		    ieee80211_is_data_qos(fc))
+			ieee80211_mpsp_trigger_process(
+				ieee80211_get_qos_ctl(hdr), sta, true, acked);
+
 		if (!acked && test_sta_flag(sta, WLAN_STA_PS_STA)) {
 			/*
 			 * The STA is in power save mode, so assume
@@ -780,13 +800,6 @@ void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 			rcu_read_unlock();
 			return;
 		}
-
-		/* mesh Peer Service Period support */
-		if (ieee80211_vif_is_mesh(&sta->sdata->vif) &&
-		    ieee80211_is_data_qos(fc))
-			ieee80211_mpsp_trigger_process(
-					ieee80211_get_qos_ctl(hdr),
-					sta, true, acked);
 
 		if (ieee80211_hw_check(&local->hw, HAS_RATE_CONTROL) &&
 		    (ieee80211_is_data(hdr->frame_control)) &&

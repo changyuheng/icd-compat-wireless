@@ -104,6 +104,9 @@ static struct fq_flow *fq_flow_classify(struct fq *fq,
 
 	lockdep_assert_held(&fq->lock);
 
+	/* HACK: disable fq for now until TCP issues are fixed */
+	return get_default_func(fq, tin, 0, skb);
+
 	hash = skb_get_hash_perturb(skb, fq->perturbation);
 	idx = reciprocal_scale(hash, fq->flows_cnt);
 	flow = &fq->flows[idx];

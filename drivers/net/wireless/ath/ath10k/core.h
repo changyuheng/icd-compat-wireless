@@ -65,6 +65,10 @@
 #define ATH10K_KEEPALIVE_MAX_IDLE 3895
 #define ATH10K_KEEPALIVE_MAX_UNRESPONSIVE 3900
 
+/* NAPI poll budget */
+#define ATH10K_NAPI_BUDGET      64
+#define ATH10K_NAPI_QUOTA_LIMIT 60
+
 struct ath10k;
 
 enum ath10k_bus {
@@ -667,6 +671,7 @@ struct ath10k_fw_components {
 struct ath10k {
 	struct ath_common ath_common;
 	struct ieee80211_hw *hw;
+	struct ieee80211_ops *ops;
 	struct device *dev;
 	u8 mac_addr[ETH_ALEN];
 
@@ -750,6 +755,12 @@ struct ath10k {
 			const char *board;
 			size_t board_size;
 			size_t board_ext_size;
+			/* Workaround of sending NULL data frames via
+			 * HTT mgmt TX and getting the proper ACK status does
+			 * not works for chipsets QCA99X0 and later, while
+			 * Tx data path reports the ACK status properly.
+			 */
+			bool disable_null_func_workaround;
 		} fw;
 	} hw_params;
 
@@ -925,6 +936,10 @@ struct ath10k {
 
 	struct ath10k_thermal thermal;
 	struct ath10k_wow wow;
+
+	/* NAPI */
+	struct net_device napi_dev;
+	struct napi_struct napi;
 
 	/* must be last */
 	u8 drv_priv[0] __aligned(sizeof(void *));

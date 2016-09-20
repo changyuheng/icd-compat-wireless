@@ -181,6 +181,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 			.board = QCA99X0_HW_2_0_BOARD_DATA_FILE,
 			.board_size = QCA99X0_BOARD_DATA_SZ,
 			.board_ext_size = QCA99X0_BOARD_EXT_DATA_SZ,
+			.disable_null_func_workaround = true,
 		},
 	},
 	{
@@ -204,6 +205,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 			.board = QCA9984_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA99X0_BOARD_DATA_SZ,
 			.board_ext_size = QCA99X0_BOARD_EXT_DATA_SZ,
+			.disable_null_func_workaround = true,
 		},
 	},
 	{
@@ -262,6 +264,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 			.board = QCA4019_HW_1_0_BOARD_DATA_FILE,
 			.board_size = QCA4019_BOARD_DATA_SZ,
 			.board_ext_size = QCA4019_BOARD_EXT_DATA_SZ,
+			.disable_null_func_workaround = true,
 		},
 	},
 };
@@ -1240,9 +1243,6 @@ static int ath10k_core_fetch_firmware_files(struct ath10k *ar)
 {
 	int ret;
 
-	/* calibration file is optional, don't check for any errors */
-	ath10k_fetch_cal_file(ar);
-
 	ar->fw_api = 5;
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n", ar->fw_api);
 
@@ -1941,7 +1941,7 @@ EXPORT_SYMBOL(ath10k_core_stop);
 static int ath10k_core_probe_fw(struct ath10k *ar)
 {
 	struct bmi_target_info target_info;
-	int ret = 0;
+	int calret, ret = 0;
 
 	ret = ath10k_hif_power_up(ar);
 	if (ret) {
@@ -1965,6 +1965,9 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 		goto err_power_down;
 	}
 
+	/* calibration file is optional, don't check for any errors */
+	calret = ath10k_fetch_cal_file(ar);
+
 	ret = ath10k_core_fetch_firmware_files(ar);
 	if (ret) {
 		ath10k_err(ar, "could not fetch firmware files (%d)\n", ret);
@@ -1987,11 +1990,14 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 			   "could not load pre cal data: %d\n", ret);
 	}
 
-	ret = ath10k_core_get_board_id_from_otp(ar);
-	if (ret && ret != -EOPNOTSUPP) {
-		ath10k_err(ar, "failed to get board id from otp: %d\n",
-			   ret);
-		goto err_free_firmware_files;
+	/* otp and board file not needed if calibration data is present */
+	if (calret) {
+		ret = ath10k_core_get_board_id_from_otp(ar);
+		if (ret && ret != -EOPNOTSUPP) {
+			ath10k_err(ar, "failed to get board id from otp: %d\n",
+				ret);
+			goto err_free_firmware_files;
+		}
 	}
 
 	ret = ath10k_core_fetch_board_file(ar);
@@ -2103,6 +2109,16 @@ int ath10k_core_register(struct ath10k *ar, u32 chip_id)
 {
 	ar->chip_id = chip_id;
 	queue_work(ar->workqueue, &ar->register_work);
+
+	/* OpenWrt requires all PHYs to be initialized to create the
+	 * configuration files during bootup. ath10k violates this
+	 * because it delays the creation of the PHY to a not well defined
+	 * point in the future.
+	 *
+	 * Forcing the work to be done immediately works around this problem
+	 * but may also delay the boot when firmware images cannot be found.
+	 */
+	flush_workqueue(ar->workqueue);
 
 	return 0;
 }
@@ -2222,6 +2238,8 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 
 	INIT_WORK(&ar->register_work, ath10k_core_register_work);
 	INIT_WORK(&ar->restart_work, ath10k_core_restart);
+
+	init_dummy_netdev(&ar->napi_dev);
 
 	ret = ath10k_debug_create(ar);
 	if (ret)

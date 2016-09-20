@@ -802,6 +802,7 @@ static void ath10k_peer_cleanup(struct ath10k *ar, u32 vdev_id)
 {
 	struct ath10k_peer *peer, *tmp;
 	int peer_id;
+	int i;
 
 	lockdep_assert_held(&ar->conf_mutex);
 
@@ -818,6 +819,17 @@ static void ath10k_peer_cleanup(struct ath10k *ar, u32 vdev_id)
 			ar->peer_map[peer_id] = NULL;
 		}
 
+		/* Double check that peer is properly un-referenced from
+		 * the peer_map
+		 */
+		for (i = 0; i < ARRAY_SIZE(ar->peer_map); i++) {
+			if (ar->peer_map[i] == peer) {
+				ath10k_warn(ar, "removing stale peer_map entry for %pM (ptr %p idx %d)\n",
+					    peer->addr, peer, i);
+				ar->peer_map[i] = NULL;
+			}
+		}
+
 		list_del(&peer->list);
 		kfree(peer);
 		ar->num_peers--;
@@ -828,6 +840,7 @@ static void ath10k_peer_cleanup(struct ath10k *ar, u32 vdev_id)
 static void ath10k_peer_cleanup_all(struct ath10k *ar)
 {
 	struct ath10k_peer *peer, *tmp;
+	int i;
 
 	lockdep_assert_held(&ar->conf_mutex);
 
@@ -836,6 +849,10 @@ static void ath10k_peer_cleanup_all(struct ath10k *ar)
 		list_del(&peer->list);
 		kfree(peer);
 	}
+
+	for (i = 0; i < ARRAY_SIZE(ar->peer_map); i++)
+		ar->peer_map[i] = NULL;
+
 	spin_unlock_bh(&ar->data_lock);
 
 	ar->num_peers = 0;
@@ -3236,6 +3253,7 @@ ath10k_mac_tx_h_get_txmode(struct ath10k *ar,
 	 * mode though because AP don't sleep.
 	 */
 	if (ar->htt.target_version_major < 3 &&
+	    !ar->hw_params.fw.disable_null_func_workaround &&
 	    (ieee80211_is_nullfunc(fc) || ieee80211_is_qos_nullfunc(fc)) &&
 	    !test_bit(ATH10K_FW_FEATURE_HAS_WMI_MGMT_TX,
 		      ar->running_fw->fw_file.fw_features))
@@ -5975,9 +5993,17 @@ static int ath10k_sta_state(struct ieee80211_hw *hw,
 				continue;
 
 			if (peer->sta == sta) {
-				ath10k_warn(ar, "found sta peer %pM entry on vdev %i after it was supposedly removed\n",
-					    sta->addr, arvif->vdev_id);
+				ath10k_warn(ar, "found sta peer %pM (ptr %p id %d) entry on vdev %i after it was supposedly removed\n",
+					    sta->addr, peer, i, arvif->vdev_id);
 				peer->sta = NULL;
+
+				/* Clean up the peer object as well since we
+				 * must have failed to do this above.
+				 */
+				list_del(&peer->list);
+				ar->peer_map[i] = NULL;
+				kfree(peer);
+				ar->num_peers--;
 			}
 		}
 		spin_unlock_bh(&ar->data_lock);
@@ -7471,21 +7497,32 @@ static const struct ieee80211_channel ath10k_5ghz_channels[] = {
 struct ath10k *ath10k_mac_create(size_t priv_size)
 {
 	struct ieee80211_hw *hw;
+	struct ieee80211_ops *ops;
 	struct ath10k *ar;
 
-	hw = ieee80211_alloc_hw(sizeof(struct ath10k) + priv_size, &ath10k_ops);
-	if (!hw)
+	ops = kmemdup(&ath10k_ops, sizeof(ath10k_ops), GFP_KERNEL);
+	if (!ops)
 		return NULL;
+
+	hw = ieee80211_alloc_hw(sizeof(struct ath10k) + priv_size, ops);
+	if (!hw) {
+		kfree(ops);
+		return NULL;
+	}
 
 	ar = hw->priv;
 	ar->hw = hw;
+	ar->ops = ops;
 
 	return ar;
 }
 
 void ath10k_mac_destroy(struct ath10k *ar)
 {
+	struct ieee80211_ops *ops = ar->ops;
+
 	ieee80211_free_hw(ar->hw);
+	kfree(ops);
 }
 
 static const struct ieee80211_iface_limit ath10k_if_limits[] = {
@@ -7705,6 +7742,21 @@ struct ath10k_vif *ath10k_get_arvif(struct ath10k *ar, u32 vdev_id)
 	return arvif_iter.arvif;
 }
 
+#ifdef CPTCFG_MAC80211_LEDS
+static const struct ieee80211_tpt_blink ath10k_tpt_blink[] = {
+	{ .throughput = 0 * 1024, .blink_time = 334 },
+	{ .throughput = 1 * 1024, .blink_time = 260 },
+	{ .throughput = 2 * 1024, .blink_time = 220 },
+	{ .throughput = 5 * 1024, .blink_time = 190 },
+	{ .throughput = 10 * 1024, .blink_time = 170 },
+	{ .throughput = 25 * 1024, .blink_time = 150 },
+	{ .throughput = 54 * 1024, .blink_time = 130 },
+	{ .throughput = 120 * 1024, .blink_time = 110 },
+	{ .throughput = 265 * 1024, .blink_time = 80 },
+	{ .throughput = 586 * 1024, .blink_time = 50 },
+};
+#endif
+
 int ath10k_mac_register(struct ath10k *ar)
 {
 	static const u32 cipher_suites[] = {
@@ -7919,6 +7971,15 @@ int ath10k_mac_register(struct ath10k *ar)
 			ath10k_warn(ar, "failed to initialise DFS pattern detector\n");
 	}
 
+	/* Current wake_tx_queue implementation imposes a significant
+	 * performance penalty in some setups. The tx scheduling code needs
+	 * more work anyway so disable the wake_tx_queue unless firmware
+	 * supports the pull-push mechanism.
+	 */
+	if (!test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL,
+		      ar->running_fw->fw_file.fw_features))
+		ar->ops->wake_tx_queue = NULL;
+
 	ret = ath_regd_init(&ar->ath_common.regulatory, ar->hw->wiphy,
 			    ath10k_reg_notifier);
 	if (ret) {
@@ -7928,6 +7989,12 @@ int ath10k_mac_register(struct ath10k *ar)
 
 	ar->hw->wiphy->cipher_suites = cipher_suites;
 	ar->hw->wiphy->n_cipher_suites = ARRAY_SIZE(cipher_suites);
+
+#ifdef CPTCFG_MAC80211_LEDS
+	ieee80211_create_tpt_led_trigger(ar->hw,
+		IEEE80211_TPT_LEDTRIG_FL_RADIO, ath10k_tpt_blink,
+		ARRAY_SIZE(ath10k_tpt_blink));
+#endif
 
 	ret = ieee80211_register_hw(ar->hw);
 	if (ret) {

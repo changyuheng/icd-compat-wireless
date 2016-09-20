@@ -600,7 +600,6 @@ static int read_file_xmit(struct seq_file *file, void *data)
 	PR("MPDUs XRetried:  ", xretries);
 	PR("Aggregates:      ", a_aggr);
 	PR("AMPDUs Queued HW:", a_queued_hw);
-	PR("AMPDUs Queued SW:", a_queued_sw);
 	PR("AMPDUs Completed:", a_completed);
 	PR("AMPDUs Retried:  ", a_retries);
 	PR("AMPDUs XRetried: ", a_xretries);
@@ -629,8 +628,7 @@ static void print_queue(struct ath_softc *sc, struct ath_txq *txq,
 	seq_printf(file, "%s: %d ", "qnum", txq->axq_qnum);
 	seq_printf(file, "%s: %2d ", "qdepth", txq->axq_depth);
 	seq_printf(file, "%s: %2d ", "ampdu-depth", txq->axq_ampdu_depth);
-	seq_printf(file, "%s: %3d ", "pending", txq->pending_frames);
-	seq_printf(file, "%s: %d\n", "stopped", txq->stopped);
+	seq_printf(file, "%s: %3d\n", "pending", txq->pending_frames);
 
 	ath_txq_unlock(sc, txq);
 }
@@ -1208,7 +1206,6 @@ static const char ath9k_gstrings_stats[][ETH_GSTRING_LEN] = {
 	AMKSTR(d_tx_mpdu_xretries),
 	AMKSTR(d_tx_aggregates),
 	AMKSTR(d_tx_ampdus_queued_hw),
-	AMKSTR(d_tx_ampdus_queued_sw),
 	AMKSTR(d_tx_ampdus_completed),
 	AMKSTR(d_tx_ampdu_retries),
 	AMKSTR(d_tx_ampdu_xretries),
@@ -1288,7 +1285,6 @@ void ath9k_get_et_stats(struct ieee80211_hw *hw,
 	AWDATA(xretries);
 	AWDATA(a_aggr);
 	AWDATA(a_queued_hw);
-	AWDATA(a_queued_sw);
 	AWDATA(a_completed);
 	AWDATA(a_retries);
 	AWDATA(a_xretries);
@@ -1319,6 +1315,198 @@ void ath9k_deinit_debug(struct ath_softc *sc)
 	ath9k_cmn_spectral_deinit_debug(&sc->spec_priv);
 }
 
+static ssize_t read_file_eeprom(struct file *file, char __user *user_buf,
+			     size_t count, loff_t *ppos)
+{
+	struct ath_softc *sc = file->private_data;
+	struct ath_hw *ah = sc->sc_ah;
+	struct ath_common *common = ath9k_hw_common(ah);
+	int bytes = 0;
+	int pos = *ppos;
+	int size = 4096;
+	u16 val;
+	int i;
+
+	if (AR_SREV_9300_20_OR_LATER(ah))
+		size = 16384;
+
+	if (*ppos < 0)
+		return -EINVAL;
+
+	if (count > size - *ppos)
+		count = size - *ppos;
+
+	for (i = *ppos / 2; count > 0; count -= bytes, *ppos += bytes, i++) {
+		void *from = &val;
+
+		if (!common->bus_ops->eeprom_read(common, i, &val))
+			val = 0xffff;
+
+		if (*ppos % 2) {
+			from++;
+			bytes = 1;
+		} else if (count == 1) {
+			bytes = 1;
+		} else {
+			bytes = 2;
+		}
+		copy_to_user(user_buf, from, bytes);
+		user_buf += bytes;
+	}
+	return *ppos - pos;
+}
+
+static const struct file_operations fops_eeprom = {
+	.read = read_file_eeprom,
+	.open = simple_open,
+	.owner = THIS_MODULE
+};
+
+
+static ssize_t read_file_chan_bw(struct file *file, char __user *user_buf,
+			     size_t count, loff_t *ppos)
+{
+	struct ath_softc *sc = file->private_data;
+	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
+	char buf[32];
+	unsigned int len;
+
+	len = sprintf(buf, "0x%08x\n", common->chan_bw);
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static ssize_t write_file_chan_bw(struct file *file, const char __user *user_buf,
+			     size_t count, loff_t *ppos)
+{
+	struct ath_softc *sc = file->private_data;
+	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
+	unsigned long chan_bw;
+	char buf[32];
+	ssize_t len;
+
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, user_buf, len))
+		return -EFAULT;
+
+	buf[len] = '\0';
+	if (kstrtoul(buf, 0, &chan_bw))
+		return -EINVAL;
+
+	common->chan_bw = chan_bw;
+	if (!test_bit(ATH_OP_INVALID, &common->op_flags))
+		ath9k_ops.config(sc->hw, IEEE80211_CONF_CHANGE_CHANNEL);
+
+	return count;
+}
+
+static const struct file_operations fops_chanbw = {
+	.read = read_file_chan_bw,
+	.write = write_file_chan_bw,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+#ifdef CONFIG_MAC80211_LEDS
+
+static ssize_t write_file_gpio_led(struct file *file, const char __user *ubuf,
+				   size_t count, loff_t *ppos)
+{
+	struct ath_softc *sc = file->private_data;
+	char buf[32], *str, *name, *c;
+	ssize_t len;
+	unsigned int gpio;
+	bool active_low = false;
+
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+
+	buf[len] = '\0';
+	name = strchr(buf, ',');
+	if (!name)
+		return -EINVAL;
+
+	*(name++) = 0;
+	if (!*name)
+		return -EINVAL;
+
+	c = strchr(name, '\n');
+	if (c)
+		*c = 0;
+
+	str = buf;
+	if (*str == '!') {
+		str++;
+		active_low = true;
+	}
+
+	if (kstrtouint(str, 0, &gpio) < 0)
+		return -EINVAL;
+
+	if (gpio >= sc->sc_ah->caps.num_gpio_pins)
+		return -EINVAL;
+
+	if (ath_create_gpio_led(sc, gpio, name, NULL, active_low) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static const struct file_operations fops_gpio_led = {
+	.write = write_file_gpio_led,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+#endif
+
+
+static ssize_t read_file_diag(struct file *file, char __user *user_buf,
+			     size_t count, loff_t *ppos)
+{
+	struct ath_softc *sc = file->private_data;
+	struct ath_hw *ah = sc->sc_ah;
+	char buf[32];
+	unsigned int len;
+
+	len = sprintf(buf, "0x%08lx\n", ah->diag);
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static ssize_t write_file_diag(struct file *file, const char __user *user_buf,
+			     size_t count, loff_t *ppos)
+{
+	struct ath_softc *sc = file->private_data;
+	struct ath_hw *ah = sc->sc_ah;
+	unsigned long diag;
+	char buf[32];
+	ssize_t len;
+
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, user_buf, len))
+		return -EFAULT;
+
+	buf[len] = '\0';
+	if (kstrtoul(buf, 0, &diag))
+		return -EINVAL;
+
+	ah->diag = diag;
+	ath9k_hw_update_diag(ah);
+
+	return count;
+}
+
+static const struct file_operations fops_diag = {
+	.read = read_file_diag,
+	.write = write_file_diag,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+
 int ath9k_init_debug(struct ath_hw *ah)
 {
 	struct ath_common *common = ath9k_hw_common(ah);
@@ -1338,6 +1526,16 @@ int ath9k_init_debug(struct ath_hw *ah)
 	ath9k_tx99_init_debug(sc);
 	ath9k_cmn_spectral_init_debug(&sc->spec_priv, sc->debug.debugfs_phy);
 
+	debugfs_create_file("eeprom", S_IRUSR, sc->debug.debugfs_phy, sc,
+			    &fops_eeprom);
+	debugfs_create_file("chanbw", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
+			    sc, &fops_chanbw);
+#ifdef CONFIG_MAC80211_LEDS
+	debugfs_create_file("gpio_led", S_IWUSR,
+			   sc->debug.debugfs_phy, sc, &fops_gpio_led);
+#endif
+	debugfs_create_file("diag", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
+			    sc, &fops_diag);
 	debugfs_create_devm_seqfile(sc->dev, "dma", sc->debug.debugfs_phy,
 				    read_file_dma);
 	debugfs_create_devm_seqfile(sc->dev, "interrupt", sc->debug.debugfs_phy,
@@ -1346,14 +1544,6 @@ int ath9k_init_debug(struct ath_hw *ah)
 				    read_file_xmit);
 	debugfs_create_devm_seqfile(sc->dev, "queues", sc->debug.debugfs_phy,
 				    read_file_queues);
-	debugfs_create_u32("qlen_bk", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
-			   &sc->tx.txq_max_pending[IEEE80211_AC_BK]);
-	debugfs_create_u32("qlen_be", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
-			   &sc->tx.txq_max_pending[IEEE80211_AC_BE]);
-	debugfs_create_u32("qlen_vi", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
-			   &sc->tx.txq_max_pending[IEEE80211_AC_VI]);
-	debugfs_create_u32("qlen_vo", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
-			   &sc->tx.txq_max_pending[IEEE80211_AC_VO]);
 	debugfs_create_devm_seqfile(sc->dev, "misc", sc->debug.debugfs_phy,
 				    read_file_misc);
 	debugfs_create_devm_seqfile(sc->dev, "reset", sc->debug.debugfs_phy,

@@ -368,7 +368,7 @@ static void purge_old_ps_buffers(struct ieee80211_local *local)
 		skb = skb_dequeue(&ps->bc_buf);
 		if (skb) {
 			purged++;
-			dev_kfree_skb(skb);
+			ieee80211_free_txskb(&local->hw, skb);
 		}
 		total += skb_queue_len(&ps->bc_buf);
 	}
@@ -451,7 +451,7 @@ ieee80211_tx_h_multicast_ps_buf(struct ieee80211_tx_data *tx)
 	if (skb_queue_len(&ps->bc_buf) >= AP_MAX_BC_BUFFER) {
 		ps_dbg(tx->sdata,
 		       "BC TX buffer full - dropping the oldest frame\n");
-		dev_kfree_skb(skb_dequeue(&ps->bc_buf));
+		ieee80211_free_txskb(&tx->local->hw, skb_dequeue(&ps->bc_buf));
 	} else
 		tx->local->total_ps_buffered++;
 
@@ -922,7 +922,7 @@ ieee80211_tx_h_fragment(struct ieee80211_tx_data *tx)
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	int frag_threshold = tx->local->hw.wiphy->frag_threshold;
-	int hdrlen;
+	int hdrlen = tx->hdrlen;
 	int fragnum;
 
 	/* no matter what happens, tx->skb moves to tx->skbs */
@@ -942,8 +942,6 @@ ieee80211_tx_h_fragment(struct ieee80211_tx_data *tx)
 	 */
 	if (WARN_ON(info->flags & IEEE80211_TX_CTL_AMPDU))
 		return TX_DROP;
-
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
 
 	/* internal error, why isn't DONTFRAG set? */
 	if (WARN_ON(skb->len + FCS_LEN <= frag_threshold))
@@ -1175,6 +1173,7 @@ ieee80211_tx_prepare(struct ieee80211_sub_if_data *sdata,
 	info->flags &= ~IEEE80211_TX_INTFL_NEED_TXPROCESSING;
 
 	hdr = (struct ieee80211_hdr *) skb->data;
+	tx->hdrlen = ieee80211_padded_hdrlen(&local->hw, hdr->frame_control);
 
 	if (likely(sta)) {
 		if (!IS_ERR(sta))
@@ -2108,7 +2107,7 @@ netdev_tx_t ieee80211_monitor_start_xmit(struct sk_buff *skb,
 		goto fail;
 
 	hdr = (struct ieee80211_hdr *)(skb->data + len_rthdr);
-	hdrlen = ieee80211_hdrlen(hdr->frame_control);
+	hdrlen = ieee80211_padded_hdrlen(&local->hw, hdr->frame_control);
 
 	if (skb->len < len_rthdr + hdrlen)
 		goto fail;
@@ -2334,7 +2333,7 @@ static struct sk_buff *ieee80211_build_hdr(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_chanctx_conf *chanctx_conf;
 	struct ieee80211_sub_if_data *ap_sdata;
 	enum nl80211_band band;
-	int ret;
+	int padsize, ret;
 
 	if (IS_ERR(sta))
 		sta = NULL;
@@ -2554,6 +2553,9 @@ static struct sk_buff *ieee80211_build_hdr(struct ieee80211_sub_if_data *sdata,
 		hdrlen += 2;
 	}
 
+	/* Check aligned4 skb required */
+	padsize = ieee80211_hdr_padsize(&sdata->local->hw, hdrlen);
+
 	/*
 	 * Drop unicast frames to unauthorised stations unless they are
 	 * EAPOL frames from the local station.
@@ -2640,6 +2642,7 @@ static struct sk_buff *ieee80211_build_hdr(struct ieee80211_sub_if_data *sdata,
 	h_pos -= skip_header_bytes;
 
 	head_need = hdrlen + encaps_len + meshhdrlen - skb_headroom(skb);
+	head_need += padsize;
 
 	/*
 	 * So we need to modify the skb header and hence need a copy of
@@ -2678,6 +2681,9 @@ static struct sk_buff *ieee80211_build_hdr(struct ieee80211_sub_if_data *sdata,
 	}
 #endif
 
+	if (padsize)
+		memset(skb_push(skb, padsize), 0, padsize);
+
 	if (ieee80211_is_data_qos(fc)) {
 		__le16 *qos_control;
 
@@ -2691,8 +2697,8 @@ static struct sk_buff *ieee80211_build_hdr(struct ieee80211_sub_if_data *sdata,
 	} else
 		memcpy(skb_push(skb, hdrlen), &hdr, hdrlen);
 
-	nh_pos += hdrlen;
-	h_pos += hdrlen;
+	nh_pos += hdrlen + padsize;
+	h_pos += hdrlen + padsize;
 
 	/* Update skb pointers to various headers since this modified frame
 	 * is going to go through Linux networking code that may potentially
@@ -2860,6 +2866,9 @@ void ieee80211_check_fast_xmit(struct sta_info *sta)
 		build.hdr_len += 2;
 		fc |= cpu_to_le16(IEEE80211_STYPE_QOS_DATA);
 	}
+
+	/* Check aligned4 skb required */
+	build.hdr_len += ieee80211_hdr_padsize(&local->hw, build.hdr_len);
 
 	/* We store the key here so there's no point in using rcu_dereference()
 	 * but that's fine because the code that changes the pointers will call
@@ -4267,7 +4276,7 @@ ieee80211_get_buffered_bc(struct ieee80211_hw *hw,
 			sdata = IEEE80211_DEV_TO_SUB_IF(skb->dev);
 		if (!ieee80211_tx_prepare(sdata, &tx, NULL, skb))
 			break;
-		dev_kfree_skb_any(skb);
+		ieee80211_free_txskb(hw, skb);
 	}
 
 	info = IEEE80211_SKB_CB(skb);

@@ -1829,6 +1829,9 @@ enum nl80211_commands {
  *	%NL80211_ATTR_EXT_CAPA_MASK, to specify the extended capabilities per
  *	interface type.
  *
+ * @NL80211_ATTR_WIPHY_ANTENNA_GAIN: Configured antenna gain. Used to reduce
+ *	transmit power to stay within regulatory limits. u32, dBi.
+ *
  * @NUM_NL80211_ATTR: total number of nl80211_attrs available
  * @NL80211_ATTR_MAX: highest attribute number currently defined
  * @__NL80211_ATTR_AFTER_LAST: internal use
@@ -2212,6 +2215,8 @@ enum nl80211_attrs {
 	NL80211_ATTR_PAD,
 
 	NL80211_ATTR_IFTYPE_EXT_CAPA,
+
+	NL80211_ATTR_WIPHY_ANTENNA_GAIN,
 
 	/* add attributes here, update the policy in nl80211.c */
 

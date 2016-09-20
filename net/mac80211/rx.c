@@ -1072,8 +1072,15 @@ static void ieee80211_rx_reorder_ampdu(struct ieee80211_rx_data *rx,
 	tid = *ieee80211_get_qos_ctl(hdr) & IEEE80211_QOS_CTL_TID_MASK;
 
 	tid_agg_rx = rcu_dereference(sta->ampdu_mlme.tid_rx[tid]);
-	if (!tid_agg_rx)
+	if (!tid_agg_rx) {
+		if (ack_policy == IEEE80211_QOS_CTL_ACK_POLICY_BLOCKACK &&
+		    !test_bit(tid, rx->sta->ampdu_mlme.agg_session_valid) &&
+		    !test_and_set_bit(tid, rx->sta->ampdu_mlme.unexpected_agg))
+			ieee80211_send_delba(rx->sdata, rx->sta->sta.addr, tid,
+					     WLAN_BACK_RECIPIENT,
+					     WLAN_REASON_QSTA_REQUIRE_SETUP);
 		goto dont_reorder;
+	}
 
 	/* qos null data frames are excluded */
 	if (unlikely(hdr->frame_control & cpu_to_le16(IEEE80211_STYPE_NULLFUNC)))
@@ -1268,7 +1275,7 @@ static void sta_ps_start(struct sta_info *sta)
 	for (tid = 0; tid < ARRAY_SIZE(sta->sta.txq); tid++) {
 		struct txq_info *txqi = to_txq_info(sta->sta.txq[tid]);
 
-		if (!txqi->tin.backlog_packets)
+		if (txqi->tin.backlog_packets)
 			set_bit(tid, &sta->txq_buffered_tids);
 		else
 			clear_bit(tid, &sta->txq_buffered_tids);
@@ -2529,6 +2536,12 @@ ieee80211_rx_h_ctrl(struct ieee80211_rx_data *rx, struct sk_buff_head *frames)
 			return RX_DROP_MONITOR;
 
 		tid = le16_to_cpu(bar_data.control) >> 12;
+
+		if (!test_bit(tid, rx->sta->ampdu_mlme.agg_session_valid) &&
+		    !test_and_set_bit(tid, rx->sta->ampdu_mlme.unexpected_agg))
+			ieee80211_send_delba(rx->sdata, rx->sta->sta.addr, tid,
+					     WLAN_BACK_RECIPIENT,
+					     WLAN_REASON_QSTA_REQUIRE_SETUP);
 
 		tid_agg_rx = rcu_dereference(rx->sta->ampdu_mlme.tid_rx[tid]);
 		if (!tid_agg_rx)
